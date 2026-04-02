@@ -30,7 +30,7 @@ def main(
     right_arm_ip: str = "192.168.1.19",
     left_arm_ip: str = "192.168.1.20",
     robot_port: int = DEFAULT_ROBOT_PORT,
-    scale_factor: float = 1.5,
+    scale_factor: float = 1.0,
     enable_log_data: bool = True,
     visualize_placo: bool = False,
     control_rate_hz: int = 50,

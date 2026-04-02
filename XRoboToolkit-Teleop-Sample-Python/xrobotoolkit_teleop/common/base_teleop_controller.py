@@ -76,6 +76,11 @@ class BaseTeleopController(abc.ABC):
 
         self._stop_event = threading.Event()
 
+        # 手柄输入低通滤波（alpha 越小越平滑，0.1~0.3 适合消抖）
+        self.controller_filter_alpha = 0.2
+        self._filtered_controller_xyz = {name: None for name in manipulator_config.keys()}
+        self._filtered_controller_quat = {name: None for name in manipulator_config.keys()}
+
         self._robot_setup()
         self._placo_setup()
 
@@ -99,6 +104,23 @@ class BaseTeleopController(abc.ABC):
             tf.quaternion_multiply(R_quat, controller_quat),
             tf.quaternion_conjugate(R_quat),
         )
+
+        # 一阶低通滤波，平滑手柄输入，消除手持抖动
+        alpha = self.controller_filter_alpha
+        if self._filtered_controller_xyz[src_name] is None:
+            self._filtered_controller_xyz[src_name] = controller_xyz.copy()
+            self._filtered_controller_quat[src_name] = np.array(controller_quat)
+        else:
+            self._filtered_controller_xyz[src_name] = (
+                alpha * controller_xyz + (1 - alpha) * self._filtered_controller_xyz[src_name]
+            )
+            # 四元数 slerp 近似：线性插值后归一化
+            q_blend = (
+                alpha * np.array(controller_quat) + (1 - alpha) * self._filtered_controller_quat[src_name]
+            )
+            self._filtered_controller_quat[src_name] = q_blend / np.linalg.norm(q_blend)
+        controller_xyz = self._filtered_controller_xyz[src_name]
+        controller_quat = self._filtered_controller_quat[src_name]
 
         if self.ref_controller_xyz[src_name] is None:
             self.ref_controller_xyz[src_name] = controller_xyz
@@ -158,7 +180,7 @@ class BaseTeleopController(abc.ABC):
             
             self.effector_task[name].configure(name, "soft", 1.0)
             manipulability = self.solver.add_manipulability_task(config["link_name"], "both", 1.0)
-            manipulability.configure("manipulability", "soft", 1e-2)
+            manipulability.configure("manipulability", "soft", 5e-2)
 
             # Set up motion tracker tasks if configured (position only)
             if "motion_tracker" in config:
@@ -184,9 +206,18 @@ class BaseTeleopController(abc.ABC):
         """
         self.placo_robot.update_kinematics()
 
+        if not hasattr(self, '_ik_dbg_tick'):
+            self._ik_dbg_tick = 0
+        self._ik_dbg_tick += 1
+        _dbg = (self._ik_dbg_tick % 50 == 0)
+
         for src_name, config in self.manipulator_config.items():
             xr_grip_val = self.xr_client.get_key_value_by_name(config["control_trigger"])
             self.active[src_name] = xr_grip_val > 0.9
+
+            if _dbg:
+                xr_pose = self.xr_client.get_pose_by_name(config["pose_source"])
+                print(f"[IK] {src_name}: grip={xr_grip_val:.3f} active={self.active[src_name]} pose=[{xr_pose[0]:.3f},{xr_pose[1]:.3f},{xr_pose[2]:.3f}]")
 
             if self.active[src_name]:
                 if self.ref_ee_xyz[src_name] is None:
@@ -195,11 +226,16 @@ class BaseTeleopController(abc.ABC):
 
                 xr_pose = self.xr_client.get_pose_by_name(config["pose_source"])
                 delta_xyz, delta_rot = self._process_xr_pose(xr_pose, src_name)
-                
+
+                if _dbg:
+                    print(f"[IK] delta_xyz={np.round(delta_xyz, 4)}")
+
                 if self.effector_control_mode[src_name] == "position":
                     # Position-only control: only apply position delta
                     target_xyz = self.ref_ee_xyz[src_name] + delta_xyz
                     self.effector_task[src_name].target_world = target_xyz
+                    if _dbg:
+                        print(f"[IK] target_xyz={np.round(target_xyz, 4)}")
                 else:
                     # Full pose control: apply both position and orientation deltas
                     target_xyz, target_quat = apply_delta_pose(
@@ -211,6 +247,8 @@ class BaseTeleopController(abc.ABC):
                     target_pose = tf.quaternion_matrix(target_quat)
                     target_pose[:3, 3] = target_xyz
                     self.effector_task[src_name].T_world_frame = target_pose
+                    if _dbg:
+                        print(f"[IK] target_xyz={np.round(target_xyz, 4)}")
             else:
                 if self.ref_ee_xyz[src_name] is not None:
                     print(f"{src_name} is deactivated.")
@@ -222,6 +260,10 @@ class BaseTeleopController(abc.ABC):
 
         try:
             self.solver.solve(True)
+            if _dbg:
+                import numpy as _np
+                q_solved = self.placo_robot.state.q
+                print(f"[IK] solved q={_np.round(q_solved, 4)}")
         except RuntimeError as e:
             print(f"IK solver failed: {e}")
 

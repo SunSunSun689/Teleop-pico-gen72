@@ -67,44 +67,40 @@ class PiperInterface:
     def _enable_and_wait(self, timeout: float = 5.0):
         """
         使能机械臂并等待就绪
-
-        Args:
-            timeout: 超时时间（秒）
         """
         print("Enabling Piper robot...")
+        # 直接发送使能命令，不依赖 EnablePiper() 的返回值（其返回的是发送前的旧状态）
+        self.piper.EnableArm(7)
         start_time = time.time()
-
-        while not self.piper.EnablePiper():
+        while True:
+            enable_status = self.piper.GetArmEnableStatus()
+            if all(enable_status):
+                print("Piper robot enabled successfully")
+                return
             if time.time() - start_time > timeout:
-                raise TimeoutError("Failed to enable Piper robot within timeout")
-            time.sleep(0.01)
+                raise TimeoutError(f"Failed to enable Piper robot within timeout, status: {enable_status}")
+            time.sleep(0.05)
 
-        print("Piper robot enabled successfully")
-
-    def go_home(self) -> bool:
+    def go_home(self, home_position=None, gripper_position: float = 0.0) -> bool:
         """
-        移动到预定义的 Home 位置（零位）
+        移动到 Home 位置
+
+        Args:
+            home_position: 关节角度列表（弧度），None 时使用默认值
+            gripper_position: 夹爪位置 (0-1)，默认 0.0
 
         Returns:
             bool: 成功返回 True
         """
-        print("Moving Piper to home position...")
+        if home_position is None:
+            home_position = [0.007, -0.0263, 0.0386, -0.1131, 0.2932, 2.1791]
 
-        # Home 位置：所有关节归零
-        home_position = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        print(f"Moving Piper to home position: {[round(v, 4) for v in home_position]}")
 
-        # 设置运动模式：位置控制模式
-        # ModeCtrl(enable, mode, speed_factor, unused)
-        # mode: 0x01 = 位置控制模式
         self.piper.ModeCtrl(0x01, 0x01, 30, 0x00)
-
-        # 发送关节位置命令
         self.set_joint_positions(home_position)
+        self.set_gripper_position(gripper_position)
 
-        # 夹爪归零
-        self.set_gripper_position(0.0)
-
-        # 等待到达
         time.sleep(2.0)
 
         return True

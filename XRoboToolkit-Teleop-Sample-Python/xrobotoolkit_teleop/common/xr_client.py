@@ -5,10 +5,16 @@ import xrobotoolkit_sdk as xrt
 class XrClient:
     """Client for the XrClient SDK to interact with XR devices."""
 
+    _initialized = False
+
     def __init__(self):
-        """Initializes the XrClient and the SDK."""
-        xrt.init()
-        print("XRoboToolkit SDK initialized.")
+        """Initializes the XrClient and the SDK (singleton: xrt.init only called once)."""
+        if not XrClient._initialized:
+            xrt.init()
+            XrClient._initialized = True
+            print("[XrClient] XRoboToolkit SDK initialized (first instance).")
+        else:
+            print("[XrClient] Reusing existing SDK connection (singleton).")
 
     def get_pose_by_name(self, name: str) -> np.ndarray:
         """Returns the pose of the specified device by name.

@@ -5,9 +5,26 @@
 """
 
 import time
+from collections import deque
 from typing import List, Union
 
 import numpy as np
+
+
+class WeightedMovingFilter:
+    """加权移动平均滤波器，平滑 IK 输出，抑制奇异点附近抖动"""
+
+    def __init__(self, weights: np.ndarray, dim: int):
+        self.weights = weights / weights.sum()
+        self.buffer = deque(maxlen=len(weights))
+        self.dim = dim
+
+    def update(self, new_data: np.ndarray) -> np.ndarray:
+        self.buffer.append(new_data.copy())
+        data = np.array(self.buffer)
+        w = self.weights[-len(data):]
+        w = w / w.sum()
+        return (data * w[:, None]).sum(axis=0)
 from Robotic_Arm.rm_robot_interface import (
     RoboticArm,
     rm_peripheral_read_write_params_t,
@@ -52,6 +69,11 @@ class Gen72Interface:
         # 一阶低通滤波器
         self.filter_alpha = filter_alpha
         self.filtered_positions = None
+
+        # 加权移动平均滤波器（平滑 IK 输出）
+        self.wma_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), self.num_joints)
+        # 上一帧关节角（用于速度限幅，单位：弧度）
+        self._last_positions = None
 
         # 初始化 SDK
         # skip_sdk_init=True 时跳过 rm_init（全局只需调用一次），每个实例仍有独立 handle
@@ -110,8 +132,8 @@ class Gen72Interface:
         """
         ret, joint_deg = self.arm.rm_get_joint_degree()
         if ret != 0 or joint_deg is None:
-            if self.filtered_positions is not None:
-                return self.filtered_positions.copy()
+            if self._last_positions is not None:
+                return self._last_positions.copy()
             return np.zeros(self.num_joints)
 
         positions = np.deg2rad(np.array(joint_deg[:self.num_joints], dtype=float))
@@ -154,17 +176,20 @@ class Gen72Interface:
             for pos, (lo, hi) in zip(positions, joint_limits)
         ])
 
-        # 一阶低通滤波
-        if self.filtered_positions is None:
-            self.filtered_positions = clipped.copy()
-        else:
-            self.filtered_positions = (
-                self.filter_alpha * clipped
-                + (1.0 - self.filter_alpha) * self.filtered_positions
-            )
+        # 速度限幅：每步最大 2°，防止奇异点附近关节突变
+        max_delta = np.deg2rad(2.0)
+        if self._last_positions is not None:
+            delta = clipped - self._last_positions
+            scale = np.max(np.abs(delta)) / max_delta
+            if scale > 1.0:
+                clipped = self._last_positions + delta / scale
+        self._last_positions = clipped.copy()
+
+        # 加权移动平均滤波（替换一阶低通）
+        smoothed = self.wma_filter.update(clipped)
 
         # 转换为角度列表（SDK 单位：度）
-        joint_deg = np.rad2deg(self.filtered_positions).tolist()
+        joint_deg = np.rad2deg(smoothed).tolist()
 
         # rm_movej_canfd: 实时流式控制，follow=True 高跟随模式
         ret = self.arm.rm_movej_canfd(joint_deg, True)

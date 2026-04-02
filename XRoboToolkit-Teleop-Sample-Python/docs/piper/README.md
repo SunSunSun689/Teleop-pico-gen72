@@ -16,6 +16,7 @@
 cd /opt/apps/roboticsservice
 bash runService.sh
 ```
+- pico打开toolkit，连接上IP，然后选择head,controller,hand,send,tracking,vision,
 
 **说明：** 这个服务会持续运行，负责接收 Pico 头显的数据。保持此终端运行。
 
@@ -23,7 +24,9 @@ bash runService.sh
 ### 2.激活can0
 ```bash
 cd SDK/piper_sdk/piper_sdk
-bash can_config.sh
+bash find_all_can_port.sh 
+bash can_activate.sh can0 1000000 USB port # bash can_activate.sh can0 1000000 3-8.1:1.0 
+bash can_activate.sh can1 1000000 USB port 
 ```
 ### 3. 启动仿真程序（终端3）
 
@@ -37,10 +40,13 @@ conda activate pico
 cd ~/teleop_pico/XRoboToolkit-Teleop-Sample-Python
 
 # 运行vr遥操
-python scripts/hardware/teleop_piper_hardware.py --can-port can0
+python scripts/hardware/read_piper_joints.py --set-home #设置piper机械臂的Home
+python scripts/hardware/teleop_piper_hardware.py 
 
 ```
-#### pico打开toolkit，连接上IP，然后选择head,controller,hand,send,tracking,vision,
+### 停止方式
+- ctrl+c,机械臂会回到Home
+**注意，机械臂达到奇异点并停止运动，需要断电重启**
 
 #### 其他可用的仿真示例
 

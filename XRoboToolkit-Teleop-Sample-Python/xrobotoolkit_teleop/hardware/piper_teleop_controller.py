@@ -41,6 +41,22 @@ DEFAULT_PIPER_MANIPULATOR_CONFIG = {
     },
 }
 
+# Piper 左臂配置
+DEFAULT_PIPER_LEFT_MANIPULATOR_CONFIG = {
+    "left_arm": {
+        "link_name": "link6",
+        "pose_source": "left_controller",
+        "control_trigger": "left_grip",
+        "gripper_config": {
+            "type": "parallel",
+            "gripper_trigger": "left_trigger",
+            "joint_names": ["gripper_joint"],
+            "open_pos": [0.85],
+            "close_pos": [0.0],
+        },
+    },
+}
+
 
 class PiperTeleopController(HardwareTeleopController):
     """
@@ -116,6 +132,9 @@ class PiperTeleopController(HardwareTeleopController):
 
     def _robot_setup(self):
         """初始化 Piper 硬件接口"""
+        import json
+        from pathlib import Path
+
         print(f"Setting up Piper robot on CAN port: {self.can_port}")
 
         self.piper = PiperInterface(
@@ -123,10 +142,31 @@ class PiperTeleopController(HardwareTeleopController):
             dt=self.dt
         )
 
-        # 移动到 Home 位置
+        # 尝试从 home_positions.json 加载自定义 home 值
+        # 默认路径：scripts/hardware/home_positions.json（由 read_joints.py --set-home 生成）
+        _default_home_file = Path(__file__).parent.parent.parent / "scripts" / "hardware" / "home_positions.json"
+        home_file = Path(os.environ.get("HOME_POSITIONS_FILE", str(_default_home_file)))
+        home_joints = None
+        home_gripper = 0.0
+        arm_key = next(iter(self.manipulator_config))  # "right_arm" or "left_arm"
+        side = "right" if "right" in arm_key else "left"
+
+        if home_file.exists():
+            try:
+                data = json.loads(home_file.read_text())
+                home_joints = data[side]["joints"]
+                home_gripper = data[side]["gripper"]
+                print(f"Loaded {side} home from {home_file}")
+            except Exception as e:
+                print(f"[WARN] Failed to load home_positions.json: {e}, using default")
+
+        # 保存 home 值供 _shutdown_robot() 使用
+        self._home_joints = home_joints
+        self._home_gripper = home_gripper
+
         print("Moving Piper to home position...")
-        self.piper.go_home()
-        time.sleep(2)  # 等待到达 Home 位置
+        self.piper.go_home(home_position=home_joints, gripper_position=home_gripper)
+        time.sleep(2)
 
         print("Piper is ready for teleoperation.")
 
@@ -155,16 +195,27 @@ class PiperTeleopController(HardwareTeleopController):
 
     def _send_command(self):
         """将 IK 求解的关节目标发送到硬件"""
+        arm_key = next(iter(self.manipulator_config))
+
         # 只有在激活状态下才发送控制命令
-        if self.active.get("right_arm", False):
+        if self.active.get(arm_key, False):
             q_des = self.placo_robot.state.q[self.placo_arm_joint_slice].copy()
+            print(f"[CMD] sending q_des={q_des.round(4)}")
             self.piper.set_joint_positions(q_des)
+        else:
+            if not hasattr(self, '_cmd_idle_printed'):
+                self._cmd_idle_printed = False
+            if not self._cmd_idle_printed:
+                print("[CMD] idle - waiting for grip activation")
+                self._cmd_idle_printed = True
+            else:
+                self._cmd_idle_printed = False
 
         # 控制夹爪
-        if "gripper_config" in self.manipulator_config["right_arm"]:
-            gripper_config = self.manipulator_config["right_arm"]["gripper_config"]
+        if "gripper_config" in self.manipulator_config[arm_key]:
+            gripper_config = self.manipulator_config[arm_key]["gripper_config"]
             joint_name = gripper_config["joint_names"][0]
-            gripper_target = self.gripper_pos_target["right_arm"][joint_name]
+            gripper_target = self.gripper_pos_target[arm_key][joint_name]
 
             # 将夹爪位置归一化到 0-1
             open_pos = gripper_config["open_pos"][0]
@@ -175,12 +226,13 @@ class PiperTeleopController(HardwareTeleopController):
 
     def _get_robot_state_for_logging(self) -> Dict:
         """返回用于日志记录的机器人状态"""
+        arm_key = next(iter(self.manipulator_config))
         return {
             "qpos": self.piper.get_joint_positions(),
             "qvel": self.piper.get_joint_velocities(),
             "qpos_des": self.placo_robot.state.q[self.placo_arm_joint_slice].copy(),
-            "gripper_target": self.gripper_pos_target["right_arm"].copy()
-            if "gripper_config" in self.manipulator_config["right_arm"]
+            "gripper_target": self.gripper_pos_target[arm_key].copy()
+            if "gripper_config" in self.manipulator_config[arm_key]
             else None,
         }
 
@@ -195,7 +247,10 @@ class PiperTeleopController(HardwareTeleopController):
     def _shutdown_robot(self):
         """优雅关闭机器人"""
         print("Shutting down Piper...")
-        self.piper.go_home()
+        self.piper.go_home(
+            home_position=getattr(self, '_home_joints', None),
+            gripper_position=getattr(self, '_home_gripper', 0.0),
+        )
         time.sleep(1)
         self.piper.disable_robot()
         print("Piper shutdown complete.")
